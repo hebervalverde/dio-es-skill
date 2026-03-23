@@ -14,7 +14,7 @@ description: >
   Também dispare quando o usuário fornecer um número de processo do governo
   do ES (formato XXXXXXXX ou XXXX-XXXXX) e pedir para pesquisar publicações.
 tools: Bash, Read, Write, Agent
-version: 1.0.0
+version: 1.1.0
 ---
 
 # DIO-ES — Pesquisa no Diário Oficial do Espírito Santo
@@ -22,7 +22,7 @@ version: 1.0.0
 Skill para pesquisa e download de publicações do Diário Oficial do Estado do
 Espírito Santo (DIO-ES) via API pública REST. Sem autenticação necessária.
 
-**Repositório:** [github.com/seu-usuario/dio-es-skill](https://github.com)
+**Repositório:** [github.com/hebervalverde/dio-es-skill](https://github.com/hebervalverde/dio-es-skill)
 **API Base:** `https://api.ioes.dio.es.gov.br`
 **Cobertura:** Todas as edições digitalizadas do DIO-ES (2000+)
 
@@ -365,15 +365,75 @@ python3 $SCRIPT download "viaturas SESP" -o "./pesquisa_viaturas" \
 | 0 resultados | Termo não encontrado | Variar termos: aspas, sem acentos, termos parciais |
 | Arquivo pequeno (<100B) | Página inexistente naquela edição | Verificar numpag da edição |
 
-### Dicas para Buscas Mais Eficazes
+### Comportamento da busca (CRITICO — aprendido em campo)
 
-1. **Números de processo** funcionam melhor sem formatação (ex: `80881378`, não `80.881.378`)
-2. **Combinar termos** reduz ruído (ex: `"glock PMES"` em vez de só `"glock"`)
-3. **Aspas** na API não funcionam como busca exata — use termos combinados
-4. **Sem acentos** às vezes retorna mais resultados
-5. **Período curto** retorna mais rápido — começar restrito e ampliar se necessário
-6. **Feriados e fins de semana** não têm edição — ajustar datas de download
-7. Resultados incluem `highlight` com `<strong>` — útil para confirmar relevância
+1. **Termos separados por espaço = OR, não AND.** Buscar `glock PMES pistola`
+   retorna 60.000+ resultados porque faz OR. Para reduzir ruído, use termos
+   mais específicos como números de processo.
+
+2. **Aspas FUNCIONAM para busca exata.** Envolver o termo em aspas no parâmetro
+   `termo` força correspondência exata. Ex: `termo="2020-1DZ8J"` retorna 15
+   resultados corretos vs 53.000+ sem aspas. Use `--exact` no script.
+
+3. **Códigos E-Docs (YYYY-XXXXX) NÃO são indexados.** O formato E-Docs
+   (`2020-0MWN5`) não funciona como busca direta — a API quebra em "2020" OR
+   "0MWN5". SEMPRE busque pelo número SEP/SEI legado (ex: `86959395`).
+
+4. **Processos do ES têm múltiplas numerações.** O mesmo processo pode ter:
+   - Número SEP físico: `80881378` (8 dígitos, pré-2019)
+   - Número SEP/SEI: `81844360` (outro número no mesmo processo)
+   - Código E-Docs: `2020-0MWN5` (pós-2019)
+   Busque TODOS os formatos para cobertura completa.
+
+5. **Números de processo** funcionam melhor sem pontos: `80881378`, não `80.881.378`
+6. **Período curto** retorna mais rápido — começar restrito e ampliar se necessário
+7. **Feriados e fins de semana** não têm edição do DIO
+8. O campo `protocolo` NÃO é ID único de resultado — pode repetir para páginas
+   da mesma edição. A chave única é `(data, edicao_numero, pagina)`.
+
+### Estratégia "Bola de Neve" (para licitações)
+
+Cada busca revela novos termos que alimentam buscas seguintes:
+
+```
+Busca "80881378" → descobre Pregão 027/2018, ARP 045/2018
+  ↓
+Busca "027/2018 glock" → descobre OF 109/2018, processo PCES 83275835
+  ↓
+Busca "83275835" → descobre OFs da Policia Civil
+  ↓
+Busca "045/2018 adesao" → descobre adesão da Bahia, SEJUS, etc.
+  ↓
+Busca processos dos aderentes → descobre mais OFs e contratos
+```
+
+Iterar até esgotar novos números. Para máxima cobertura, lançar subagentes
+em paralelo (um por cadeia processual).
+
+### Categorização automática de resultados
+
+O script detecta o tipo de ato pelo highlight:
+
+| Padrão no texto | Categoria |
+|-----------------|-----------|
+| "aviso de licitação" | `AVISO_LICITACAO` |
+| "resultado de licitação" | `RESULTADO_LICITACAO` |
+| "ata de registro de preço" | `ATA_RP` |
+| "ordem de fornecimento" | `ORDEM_FORNECIMENTO` |
+| "extrato de contrato" | `CONTRATO` |
+| "adesão" / "carona" | `ADESAO` |
+| "doação" | `DOACAO` |
+| "retificação" / "errata" | `RETIFICACAO` |
+| "liminar" / "sobrestado" | `COMUNICADO_JUDICIAL` |
+| "nota de empenho" | `EMPENHO` |
+| "denúncia" + "tce" | `TCE_DENUNCIA` |
+
+Use `--categorize` no script para ativar.
+
+### Preferir download de página individual
+
+**SEMPRE prefira baixar a página individual** (200KB) em vez da edição completa
+(5-50MB). Usar `--full` somente quando explicitamente solicitado pelo usuário.
 
 ---
 
@@ -388,8 +448,10 @@ python3 $SCRIPT download "viaturas SESP" -o "./pesquisa_viaturas" \
 ## Limitações Conhecidas
 
 - API retorna no máximo **50 resultados por página** de busca
+- Termos separados por espaço são tratados como **OR, não AND**
+- **Códigos E-Docs** (YYYY-XXXXX) não são indexados pela busca textual
 - Downloads de edições completas podem ser **grandes** (5-50 MB por edição)
-- A busca textual é **full-text** mas não suporta operadores booleanos (AND/OR/NOT)
 - Edições muito antigas podem não estar digitalizadas
 - Em horários de pico, a API pode responder lentamente
-- O campo `protocolo` na busca NÃO é o ID da edição — é o ID da matéria
+- O campo `protocolo` NÃO é o ID da edição — pode repetir para páginas do mesmo ato
+- A chave única de resultado é `(data, edicao_numero, pagina)`, não `protocolo`

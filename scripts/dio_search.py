@@ -6,8 +6,16 @@ Diário Oficial do Estado do Espírito Santo (DIO-ES) public API.
 API base: https://api.ioes.dio.es.gov.br
 No authentication required — all endpoints are public.
 
+IMPORTANT — Search behavior:
+  - Multiple words separated by spaces are treated as OR, not AND.
+  - To force exact match, wrap the term in quotes: '"2020-1DZ8J"'
+  - E-Docs codes (YYYY-XXXXX) are NOT indexed; use the legacy SEP number.
+  - The unique key for a result is (data, edicao_numero, pagina), NOT protocolo.
+  - protocolo may repeat across pages of the same edition.
+
 Author: Claude Code / Anthropic
 License: MIT
+Version: 1.1.0
 """
 
 import argparse
@@ -403,6 +411,37 @@ def generate_index(termo: str, results: list, dest: str,
         f.write("\n".join(lines))
 
 
+# ── Categorization ───────────────────────────────────────────────────────────
+
+CATEGORY_PATTERNS = [
+    ("AVISO_LICITACAO",      [r"aviso de licita", r"aviso de preg", r"torna p.blico.*far. realizar"]),
+    ("RESULTADO_LICITACAO",  [r"resultado de licita", r"resultado.*preg.o", r"situa..o final do lote"]),
+    ("ATA_RP",               [r"ata de registro de pre", r"resumo da ata"]),
+    ("ADITIVO_ARP",          [r"aditivo.*ata de registro", r"termo aditivo.*ata"]),
+    ("ORDEM_FORNECIMENTO",   [r"ordem de fornecimento", r"resumo.*ordem.*fornec"]),
+    ("CONTRATO",             [r"extrato de contrato", r"resumo.*contrato", r"contrato n"]),
+    ("ADESAO",               [r"ades.o.*ata", r"aviso de ades", r"solicita.*ades.o", r"carona"]),
+    ("DOACAO",               [r"doa..o", r"termo de doa", r"contrato de doa"]),
+    ("RETIFICACAO",          [r"retifica", r"errata", r"onde se l.", r"leia.se"]),
+    ("COMUNICADO_JUDICIAL",  [r"liminar", r"sobrestado", r"decis.o.*judicial"]),
+    ("EMPENHO",              [r"nota de empenho", r"empenho n"]),
+    ("HOMOLOGACAO",          [r"homologa..o", r"homologar"]),
+    ("NOTICIA",              [r"governo.*entrega", r"recebeu.*pistola", r"investimento.*seguran"]),
+    ("TREINAMENTO",          [r"curso.*glock", r"treinamento.*pistola", r"capacita..o.*arma"]),
+    ("TCE_DENUNCIA",         [r"den.ncia.*tce", r"tribunal de contas"]),
+]
+
+
+def categorize_result(highlight: str) -> str:
+    """Categorize a search result based on keyword patterns in the highlight."""
+    text = strip_html(highlight).lower()
+    for category, patterns in CATEGORY_PATTERNS:
+        for pattern in patterns:
+            if re.search(pattern, text):
+                return category
+    return "OUTROS"
+
+
 # ── Utility functions ────────────────────────────────────────────────────────
 
 def strip_html(text: str) -> str:
@@ -428,7 +467,7 @@ def format_results_json(results: list) -> str:
     """Format results as JSON for machine consumption."""
     clean = []
     for r in results:
-        clean.append({
+        entry = {
             "data": r["data"],
             "pagina": r["pagina"],
             "edicao_numero": r["edicao_numero"],
@@ -438,7 +477,10 @@ def format_results_json(results: list) -> str:
             "highlight": strip_html(r.get("highlight", "")),
             "arquivo": r.get("_arquivo"),
             "edicao_id": r.get("_edicao_id"),
-        })
+        }
+        if "_categoria" in r:
+            entry["categoria"] = r["_categoria"]
+        clean.append(entry)
     return json.dumps(clean, indent=2, ensure_ascii=False)
 
 
@@ -500,6 +542,10 @@ Exemplos:
     sp_search.add_argument("--all", "-a", action="store_true", help="Buscar todas as páginas")
     sp_search.add_argument("--max", type=int, default=200, help="Máx. resultados (com --all)")
     sp_search.add_argument("--json", action="store_true", help="Saída em JSON")
+    sp_search.add_argument("--exact", "-e", action="store_true",
+                           help="Busca exata (envolve o termo em aspas)")
+    sp_search.add_argument("--categorize", action="store_true",
+                           help="Categorizar resultados por tipo de ato")
 
     # ── download ─────────────────────────────────────────────────────────
     sp_dl = subparsers.add_parser("download", help="Buscar e baixar páginas/edições")
@@ -547,14 +593,19 @@ Exemplos:
     # ── Execute commands ─────────────────────────────────────────────────
 
     if args.command == "search":
+        termo = f'"{args.termo}"' if args.exact else args.termo
         if args.all:
-            results = search_all_pages(args.termo, args.inicio, args.fim, args.max)
+            results = search_all_pages(termo, args.inicio, args.fim, args.max)
         else:
-            data = search(args.termo, args.inicio, args.fim, args.limite, args.pagina)
+            data = search(termo, args.inicio, args.fim, args.limite, args.pagina)
             results = data.get("resultados", [])
             total = data.get("total", 0)
             if not args.json:
                 print(f"Total: {total} (mostrando {len(results)})\n")
+
+        if hasattr(args, 'categorize') and args.categorize:
+            for r in results:
+                r["_categoria"] = categorize_result(r.get("highlight", ""))
 
         if args.json:
             print(format_results_json(results))
